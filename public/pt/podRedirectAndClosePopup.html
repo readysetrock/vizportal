@@ -1,0 +1,14 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fechando pop-up</title><script src="/js.cookie.js?6c9douvp67a7zaor"></script></head><body><script type="text/javascript">var siteMatch = window.location.search.match(/site=([^&]*)/);
+var site = decodeURIComponent(siteMatch && siteMatch[1]);
+
+var newHost = window.location.protocol + '//' + window.location.host;
+
+// set a cookie that expires in 1 second and is readable from all sub-domains
+var expires = new Date(Date.now() + 1000);
+var domain = window.location.host.split('.').slice(-2).join('.');
+// the site name is part of the cookie to cater to the case of multiple embedded
+// vizzes from different sites (which may be on different pods)
+var cookieName = 'redirectToPod' + site;
+Cookies.set(cookieName, newHost, {expires: expires, domain: domain});
+
+window.close();</script></body></html>

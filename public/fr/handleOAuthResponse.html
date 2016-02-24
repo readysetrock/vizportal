@@ -1,0 +1,15 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><script>window.onload = function() {
+
+  // IE may not have window.opener defined, if it doesn't there's nothing we can do so let's exit
+  if(window.opener) {
+
+    try {
+      // Older versions of IE do not fully support postMessage in an opened window
+      window.opener.postMessage(window.location.search, '*');
+    } catch (e) {
+      window.opener.tableauPopupComplete(window.location.search);
+    }
+  }
+
+  window.close();
+};</script></head></html>

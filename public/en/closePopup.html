@@ -1,0 +1,19 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Closing popup</title></head><body><script type="text/javascript">// all we do is close this popup and fire events to the opener.
+var openerPage = window.opener;
+if (openerPage) {
+  if (openerPage.tableauPopupComplete) {
+    try {
+      openerPage.tableauPopupComplete()
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  if (openerPage.tab) {
+    try {
+      openerPage.tab.LogOnView.fireLogOnComplete()
+    } catch (e) {
+      console.error(e);
+    }
+  }
+}
+window.close();</script></body></html>

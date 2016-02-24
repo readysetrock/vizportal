@@ -1,0 +1,682 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><script src="/console-polyfill.js?6c9douvp67a7zaor"></script><script src="/jquery.js?6c9douvp67a7zaor"></script><script src="/underscore.js?6c9douvp67a7zaor"></script><script>// This is needed to hide any spinners the parent frame might be using
+try {
+  window.parent.postMessage('tableau.loadIndicatorsLoaded', '*');
+} catch (e) {
+}
+// See return value for documentation
+window.EmbeddedAuthHelper = (function(window, $, _) {
+
+  // This function corrects a bug caused by $.param, which replaces spaces with '+' characters
+  // TODO: Write a test that attempts to access the web authoring page of a view that has a space in its name
+  // (i.e. "Sheet 1") via a redirect after authentication
+  function param() {
+    return $.param.apply($, arguments).replace(/\+/g, '%20');
+  }
+
+  // Simple implementation for the inverse of $.param() for flat objects
+  var deparam = (function () { // Initialize the deparam() method
+    function toPrimitive(str) {
+      if (str === 'undefined') return undefined;
+      if (str === 'null') return null;
+      if (str === 'true') return true;
+      if (str === 'false') return false;
+      if (str === 'NaN') return NaN;
+      if (str === '') return '';
+      var num = Number(str);
+      if (!_.isNaN(num)) return num;
+      return str;
+    }
+
+    // Given a query fragment string, it returns an array of the key/value pair.
+    // Example: splitQueryFrag("key=value") => ["key","value"]
+    function splitQueryFrag(queryFrag) {
+      if (!queryFrag) return;
+      var fragMatch = queryFrag.match(/([^=]*)=?(.*)/);
+      if (!fragMatch) return;
+      return [decodeURIComponent(fragMatch[1]), toPrimitive(decodeURIComponent(fragMatch[2]))];
+    }
+
+    return function deparam(queryString) {
+      if (!queryString) return {};
+      return _.chain(queryString.split('&'))
+              .map(splitQueryFrag)
+              .compact()
+              .object()
+              .value();
+    }
+  })();
+
+  // NOTE: Keep these in sync with the code in AddOAuthCredentialAction.ts.
+  var attemptAuth = (function() {
+    var deferred = $.Deferred();
+    var openWindow;
+
+    function removeOpenWindow() {
+      try {
+        openWindow.close();
+      } catch (e) {
+      } // Closing the window is best effort so nothing else to do instead
+
+      openWindow = null;
+    }
+
+    // success callback
+    var notifySuccess = function(credentialId) {
+      deferred.resolve(credentialId);
+      removeOpenWindow();
+    };
+
+      // error callback
+    var notifyError = function(errorCode) {
+      deferred.reject(errorCode);
+      removeOpenWindow();
+    };
+
+    function handleResponse(response) {
+      if(!response) response = '';
+
+      var errorCodeMatch = response.match(/errorCode=([^&]*)/);
+      if(errorCodeMatch) {
+        var errorCode = parseInt(errorCodeMatch[1], 10) || 0;
+        notifyError(errorCode);
+        return;
+      }
+
+      var newCredentialIdMatch = response.match(/id=([^&]*)/);
+      if(newCredentialIdMatch) {
+        notifySuccess(newCredentialIdMatch[1]);
+        return;
+      }
+
+      notifySuccess();
+    }
+
+    window.tableauPopupComplete = handleResponse;
+
+    $(window).on('message', function(jqEvent) {
+      var data = jqEvent.originalEvent.data;
+
+      // Ignore messages that don't come from the open window
+      if(jqEvent.originalEvent.source != openWindow || !_.isString(jqEvent.originalEvent.data)) return;
+
+      handleResponse(jqEvent.originalEvent.data);
+    });
+
+    // The user is navigating away from this page so the popup is no longer needed, let's try to remove it for them.
+    $(window).on('unload', removeOpenWindow);
+
+    // Open the popup
+    function openPopup(uri) {
+      var popupOptions = {
+        width: 800,
+        height: 600,
+        toolbar: 1,
+        resizable: 1
+      };
+
+      // IE8 polyfills. Note that outer* ones are not quite right for IE8, but good enough. B147312
+      var screenLeft = window.screenLeft || window.screenX;
+      var outerWidth = window.outerWidth || window.innerWidth;
+      var screenTop = window.screenTop || window.screenY;
+      var outerHeight = window.outerHeight || window.innerHeight;
+
+      // Open horizontally centered on current window
+      popupOptions.left = screenLeft + (outerWidth - popupOptions.width) / 2;
+
+      // Open a small amount from the top
+      popupOptions.top = screenTop + (outerHeight - popupOptions.height) / 8;
+
+      var popupOptionsString = _.map(popupOptions, function(val, key) { return key + "=" + val }).join(',');
+      openWindow = window.open(uri, 'TableauAuth', popupOptionsString);
+    }
+
+    return function attemptAuth(uri) {
+      // reject the previous request because a new request will be made in the same window
+      notifyError();
+
+      deferred = new $.Deferred();
+      openPopup(uri);
+
+      try {
+        // This will move the new open window on top of the window that opened it.  This is needed because we may
+        // not be able to close the window if it's open to a third party for OAuth
+        openWindow.focus();
+      } catch (e) { }
+
+      return deferred.promise();
+    }
+
+  }());
+
+  // Taken from WindowLocationService.setPathQueryFragment
+  var setPathQueryFragment = function(pathQueryFragment) {
+    var origin = window.location.protocol + '//' + window.location.host;
+    // add leading slash if it's missing
+    if(/^[^\/]/.test(pathQueryFragment)) {
+      pathQueryFragment = '/' + pathQueryFragment;
+    }
+    window.location.href = origin + pathQueryFragment;
+  }
+
+  function formatText(str, params) {
+    return str.replace(/\{([^}]*)}/g, function(frag, key) {
+      var val = params && params[key];
+      if(!val) console.error('Missing key: ' + key);
+      return val || frag;
+    });
+  }
+
+  return {
+    // arguments: uri to open
+    // returns: a promise that is fulfilled if window reports success or rejected with an error code
+    //          if the window reports an error
+    attemptAuth: attemptAuth,
+
+    // arguments: query string
+    // returns: query parameters as a Dict
+    deparam: deparam,
+
+    // arguments: same as the JQuery param method, http://api.jquery.com/jquery.param/
+    // This method differs from the JQuery one in that it replaces '+' with '%20'
+    param: param,
+
+    // arguments: path + query + fragment. Leading '/' optional.
+    // returns: void. Navigates away from page.
+    setPathQueryFragment: setPathQueryFragment,
+
+    // arguments: none
+    // returns: window.location's query parameters as a Dict
+    getQueryParams: function() {
+      return deparam(window.location.search.slice(1));
+    },
+
+    // arguments:
+    //   text[string]: text string with variables in the messageformat syntax
+    //   params[object]: the params object used for variable replacement in the string in the messageformat syntax.
+    // returns: text with defined variables
+    // NOTE: this method only does simple variable replacement from the messageformat syntax.
+    // If more complex translations are needed then this needs to include messageformat.js
+    formatText: formatText
+  };
+
+}(window, jQuery, _));
+
+window.VizPortalRequest = (function(window, $, _) {
+
+  var XSRF_TOKEN_COOKIE_KEY = 'XSRF-TOKEN';
+  var XSRF_TOKEN_HEADER_KEY = 'X-XSRF-TOKEN';
+
+  var VIZPORTAL_PATH_PREFIX = '/vizportal';
+
+  var ErrorTextStatus = 'Response has errors';
+
+  function rejectPromise() {
+    var deferred = new $.Deferred();
+    return deferred.reject.apply(deferred, _.toArray(arguments)).promise();
+  }
+
+  function getXsrfToken() {
+    // Adapted from http://stackoverflow.com/a/18652401
+    var keyValueMatch = window.document.cookie.match(new RegExp('(^|;) ?' + XSRF_TOKEN_COOKIE_KEY + '=([^;]*)(;|$)'));
+    return keyValueMatch && keyValueMatch[2];
+  }
+
+  function getResultError(result) {
+    return result.errors && result.errors[0];
+  }
+
+  function send(method, params) {
+    var headers = {};
+    headers[XSRF_TOKEN_HEADER_KEY] = getXsrfToken();
+
+    var vizportalRequestOptions = {
+      type: 'POST',
+      contentType: 'application/json;charset=UTF-8',
+      dataType: 'json',
+      headers: headers,
+      url: VIZPORTAL_PATH_PREFIX + '/api/web/v1/' + method,
+      data: JSON.stringify({
+        method: method,
+        params: params
+      })
+    };
+
+    // success( Anything data, String textStatus, jqXHR jqXHR )
+    // error(jqXHR jqXHR, String textStatus, String errorThrown)
+    return $.ajax(vizportalRequestOptions)
+            .then(function (data, textStatus, jqXHR) {
+              var result = data && data.result;
+
+              if (getResultError(result)) {
+                return rejectPromise(jqXHR, ErrorTextStatus);
+              }
+
+              return data.result;
+            });
+    }
+
+    return {
+      // arguments:
+      //   method[string]: the method string passed to the VizPortal API method
+      //   params[object]: the params object passed to the VizPortal API method
+      // returns JQuery promise, success contains the result and rejected returns a normal JQuery ajax failure
+      send: send,
+      getResultError: getResultError,
+      ErrorTextStatus: ErrorTextStatus
+    }
+  })(window, jQuery, _);</script><script>(function(window, $, _) {
+
+  // Set the title to match the server name
+  VizPortalRequest.send('getServerSettingsUnauthenticated')
+    .then(function(serverSettings) {
+      var customization = serverSettings && serverSettings.customization;
+      var serverName = customization && customization.serverName;
+      window.document.title = serverName || "Tableau Server";
+    });
+
+  // Generic helper methods
+
+  var formatText = EmbeddedAuthHelper.formatText;
+
+  function safelyformatTextWithHtml(str, params) {
+    return formatText(_.escape(str), params);
+  }
+
+  function resolvePromiseWithArguments(args) {
+    var deferred = new $.Deferred();
+    return deferred.resolve.apply(deferred, args).promise();
+  }
+
+  function resolvePromise() {
+    return resolvePromiseWithArguments(_.toArray(arguments));
+  }
+
+  function isTruthyQueryValue(val) {
+    return /^(y|yes|t|true|1)$/.test(val + '');
+  }
+
+  // This is an alternative to EmbeddedAuthHelper.deparam() then $.param() so there is
+  // less risk in decoding then encoding all query params
+  function removeQueryKeyFromHref(href, queryKey) {
+    var queryKeyRegex = new RegExp('[?&]' + queryKey + '=[^&#]*&?');
+    return href.replace(queryKeyRegex, function(queryKeyQueryParam) {
+      var firstChar = queryKeyQueryParam[0];
+      var lastChar = queryKeyQueryParam.slice(-1);
+
+      // If the fragment is followed by an & then it was the first or middle query part so keep the first character,
+      // otherwise it must have been the last query part so remove all of it
+      return (lastChar === '&') ? firstChar : '';
+    });
+  }
+
+  // STATIC VARIABLES
+
+  var AUTHENTICATION_PATH = '/authenticate';
+
+  var REQUEST_OAUTH_PATH = '/auth/request_oauth';
+
+  var PREVIEW_QUERY_KEY = ':preview';
+
+  // Variables
+
+  var OAuthCredentialTypes = {
+    Salesforce: 'salesforce',
+    BigQuery: 'bigquery',
+    GoogleAnalytics: 'google-analytics'
+  };
+
+  var queryObj = EmbeddedAuthHelper.getQueryParams();
+
+  var path = queryObj['path'];
+  var attributes = queryObj['attributes'];
+  
+  // vizql session ID is specified when we aren't in session bootstrap;
+  // otherwise it should be sent to the server as "0".
+  var sessionId = queryObj['sessionId'];
+  if (sessionId === undefined)
+    sessionId = '0';
+
+  // TODO: Move this logic to the server side
+  var isPreview = (function() {
+    var pathQueryMatch = path.match(/\?([^#]*)/);
+    var pathQuery = pathQueryMatch ? pathQueryMatch[1] : '';
+    var pathParams = EmbeddedAuthHelper.deparam(pathQuery);
+
+    return isTruthyQueryValue(pathParams[PREVIEW_QUERY_KEY]);
+  })();
+
+  var isFromDesktop = isTruthyQueryValue(queryObj['fromDesktop']);
+
+  // VizPortal Request helpers
+
+  var getResultError = VizPortalRequest.getResultError;
+  var vizportalRequest = VizPortalRequest.send;
+
+  function fetchItems(method, fetchItemOptions) {
+    var options = _.extend(
+      { // Default fetchItemOptions
+        parsePageResult: _.identity,
+        startIndex: 0,
+        filterClauses: null
+      },
+      fetchItemOptions
+    );
+
+    var params = {};
+    if(_.isNumber(options.startIndex))   params.page = { startIndex: options.startIndex };
+    if(_.isArray(options.filterClauses)) params.filter = { operator: 'and', clauses: options.filterClauses };
+
+    return vizportalRequest(method, params)
+      .then(function(result, textStatus, jqXHR) {
+        var items = options.parsePageResult(result);
+        if(!result.moreItems) return items;
+
+        var nextPageOptions = _.clone(fetchItemOptions);
+        nextPageOptions.startIndex = options.startIndex + items.length;
+
+        return fetchItems(method, nextPageOptions)
+          .then(function(remainingItems) {
+            return items.concat(remainingItems);
+          });
+      });
+  }
+
+  // VizPortal requests
+
+  // hasValidPath is used to prevent an open redirect vulnerability by ensuring this page only redirects to paths
+  // that server has successfully processed.
+  var hasValidPath = false;
+  function getAuthInfo() {
+    return vizportalRequest('getDataConnectionAuthInfo', { path: path, sessionId: sessionId, attributes: attributes })
+            .then(function() {
+              hasValidPath = true;
+              return resolvePromiseWithArguments(_.toArray(arguments));
+            });
+  }
+
+  function associateOAuthCredential(credentialId, resourceType, resourceId) {
+    return vizportalRequest('associateOAuthCredential', {
+      credentialId: credentialId,
+      resourceType: resourceType,
+      resourceId:   resourceId
+    });
+  }
+
+  function getOAuthCredentials(type) {
+    return fetchItems('getOAuthCredentials', {
+      parsePageResult: function(result) { return result.credentials; },
+      filterClauses: [{ operator: "eq", field: "type", value: type }]
+    });
+  }
+
+  function goBackToViz() {
+    if (sessionId != "0") {
+      window.parent.postMessage("tableau.authCompleted", "*");
+      return;
+    }
+
+    if(!hasValidPath) {
+      console.error('Invalid redirect path: ' + path);
+      return;
+    }
+
+    window.location.href = path;
+  }
+
+  // Methods for rendering html
+
+  function getAdvisoryTextFor(type) {
+    switch(type) {
+      case OAuthCredentialTypes.Salesforce:
+        return "Después de hacer clic en {BUTTON_HTML}, Salesforce muestra una página de confirmación en la que debe verificar que haya iniciado sesión en la cuenta de Salesforce correcta para aprobar el acceso.";
+      case OAuthCredentialTypes.BigQuery:
+      case OAuthCredentialTypes.GoogleAnalytics:
+        return "Después de hacer clic en {BUTTON_HTML}, Google muestra una página de confirmación en la que debe verificar que haya iniciado sesión en la cuenta de Google correcta antes de aprobar el acceso.";
+      default:
+        return "Después de hacer clic en {BUTTON_HTML}, se muestra una página de autenticación en la que debe indicar las credenciales de base de datos correctas para obtener acceso.";
+    }
+  }
+
+  var FragmentHelper = {
+
+    prompt: function(text) {
+      return $('<div class="tb-embedded-auth-prompt">').text(text);
+    },
+
+    associatedCredentialWarningPrompt: function() {
+      return this.prompt("Compruebe que ha indicado unas credenciales válidas para esta fuente de datos.")
+                 .addClass('tb-associated-with-key');
+    },
+
+    descriptionPrompt: function(typeDisplayName) {
+      var promptText = formatText("Esta vista requiere acceso a la base de datos {TYPE_NAME}.", { TYPE_NAME: typeDisplayName });
+      return this.prompt(promptText);
+    },
+
+    openInBrowserPromptFor: function(path) {
+      var openBrowserLink = $('<a>')
+                              .attr({ href: path, target: '_blank' }) // JQuery attr escapes the values
+                              .text("Abrir esta vista en una ventana del navegador")
+                              .prop('outerHTML');
+
+      var openBrowserText = "{ACTION_HTML} para continuar.";
+      var openBrowserHtml = safelyformatTextWithHtml(openBrowserText, { ACTION_HTML: openBrowserLink })
+
+      return this.prompt().addClass('tb-oauth-preview').html(openBrowserLink);
+    },
+
+    selectOAuthCredentialFrom: function(oauthCredentials) {
+      var selectOAuthCredentialTemplate = $('#oauth-select-credentials').html();
+      return $(_.template(selectOAuthCredentialTemplate, { '_': _, oauthCredentials : oauthCredentials }));
+    },
+
+    authenticateButton: function(type, typeDisplayName) {
+      var buttonText = formatText("Autenticar con {TYPE_NAME}", { TYPE_NAME: typeDisplayName });
+
+      var advisoryButtonHtml = '<span class="tb-highlight">' + _.escape(buttonText) + '</span>';
+      var advisoryMessageText = getAdvisoryTextFor(type);
+      var advisoryMessageHtml = safelyformatTextWithHtml(advisoryMessageText, { BUTTON_HTML: advisoryButtonHtml });
+
+      var authButtonTemplate = $('#auth-button-tmpl').html();
+      return $(_.template(authButtonTemplate, {
+        buttonText: buttonText,
+        advisoryMessageHtml: advisoryMessageHtml
+      }));
+    },
+
+    errorMessage: function(errorMessage) {
+      return $('<div>').addClass('tb-error').text(errorMessage);
+    },
+
+    goBackToDesktopMessage: function() {
+      return $('<div>').text("Sus credenciales se han asociado correctamente. Para continuar, vuelva a Desktop y haga clic en “Conectar”.");
+    }
+  }
+
+  function getAuthUri(type, isOAuth) {
+    return isOAuth
+        ? REQUEST_OAUTH_PATH + '?' + $.param({ 'data_class': type, 'view_path': path })
+        : '/#' + AUTHENTICATION_PATH + '?' + $.param({ path: path, sessionId: sessionId, attributes: attributes });
+  }
+
+  function getPopupUri(type, isOAuth) {
+    var uri = getAuthUri(type, isOAuth);
+    // Make sure that the pop up gets closed after done
+    uri += ('&' + $.param({ closePopupWhenDone: true }));
+    return uri;
+  }
+
+  function renderPage(authInfo, oauthCredentials) {
+    if(!authInfo) return; // We can't render anything without authInfo
+
+    // TODO: Move this logic for isOAuth to the server
+    var isOAuth = _.contains(OAuthCredentialTypes, authInfo.connectionType);
+
+    if(!isOAuth && window == window.top) {
+      window.location.href = getAuthUri(authInfo.connectionType, isOAuth);
+      return;
+    }
+
+    var popupUri = getPopupUri(authInfo.connectionType, isOAuth);
+    var attemptAuth = function() {
+      return EmbeddedAuthHelper.attemptAuth(popupUri);
+    };
+
+    var handleAuthSuccess = (isOAuth && isFromDesktop)
+                          ? function() { page.html(FragmentHelper.goBackToDesktopMessage()); }
+                          : goBackToViz;
+
+    var page = $('.tb-embedded-auth');
+
+    if(!isPreview && authInfo.associatedCredentialId) {
+      page.append(FragmentHelper.associatedCredentialWarningPrompt());
+    }
+
+    page.append(FragmentHelper.descriptionPrompt(authInfo.connectionTypeDisplayName));
+
+    if(isPreview) {
+
+      var browserPath = removeQueryKeyFromHref(path, PREVIEW_QUERY_KEY);
+      page.append(FragmentHelper.openInBrowserPromptFor(browserPath));
+
+    } else if(oauthCredentials && oauthCredentials.length > 0) {
+
+      page.append(FragmentHelper.selectOAuthCredentialFrom(oauthCredentials));
+
+      $('.tb-oauth-select-credentials select').on('change', function(e) {
+        var credentialId = $(this).val();
+        if (credentialId === 'new') {
+          attemptAuth()
+            .then(function(credentialId) {
+              // TODO: This should be moved to the server side
+              if(!credentialId) return;
+              return associateOAuthCredential(credentialId, authInfo.resourceType, authInfo.resourceId)
+            })
+            .then(handleAuthSuccess);
+        } else if(credentialId) {
+          associateOAuthCredential(credentialId, authInfo.resourceType, authInfo.resourceId)
+            .then(handleAuthSuccess)
+            .fail(function() {
+              // TODO: Create specialized errors depending on the error case
+
+              var errorMessage = "Se produjo un error al asociar la credencial seleccionada";
+              $('.tb-oauth-select-credentials .tb-error').text(errorMessage);
+            });
+        }
+      });
+
+    } else {
+
+      page.append(FragmentHelper.authenticateButton(authInfo.connectionType, authInfo.connectionTypeDisplayName));
+
+      $('.tb-embedded-auth-open-popup').on('click', function() {
+        attemptAuth().then(handleAuthSuccess);
+      });
+
+      // Attempt to open the window for the user
+      if(!isOAuth) attemptAuth().then(goBackToViz);
+    }
+  }
+
+  function fetchAdditionalInfoIfNeeded(authInfo) {
+
+    // The server automatically associated the viz with the user's credentials so there's nothing to do here
+    if(authInfo.automaticallyAssociated) {
+      goBackToViz();
+      return;
+    }
+
+    // Use authInfo to determine whether to fetch additional parameters
+    if(authInfo.oauthCredentialCount > 0) {
+      return getOAuthCredentials(authInfo.connectionType).then(function(oauthCredentials) {
+        return resolvePromise(authInfo, oauthCredentials);
+      });
+    } else {
+      return authInfo;
+    }
+  }
+
+  function renderError(jqXHR) {
+    //TODO: Use jqXHR to determine the error
+    if(jqXHR && jqXHR.status === 200) {
+      var vizPortalError = getResultError(jqXHR.responseJSON.result);
+      //TODO: Error handling
+
+      console.log('VizPortal Error: ' + JSON.stringify(vizPortalError));
+    }
+
+    var errorMessage = "Se produjo un error.";
+
+    $('.tb-embedded-auth').append(FragmentHelper.errorMessage(errorMessage));
+  }
+
+  // Page loading logic
+
+  var documentReadyDeferred = new $.Deferred();
+  $(function() { documentReadyDeferred.resolve() });
+
+  $.when(getAuthInfo(), documentReadyDeferred)
+    .then(fetchAdditionalInfoIfNeeded)
+    .then(renderPage, renderError);
+
+})(window, jQuery, _);</script><style>.tb-embedded-auth {
+  margin-top: 50px;
+  text-align: center;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 12px;
+}
+
+.tb-embedded-auth-prompt {
+  margin-bottom: 20px;
+}
+
+.tb-oauth-preview {
+  color: #C00;
+}
+
+.tb-oauth-select-credentials-prompt {
+  margin-right: 5px;
+}
+
+.tb-oauth-select-credentials select {
+  color: #5473a0;
+  border: 1px solid #cecece;
+  vertical-align: middle;
+}
+
+.tb-embedded-auth-open-popup {
+  color: #FFFFFF;
+  background: #E57817;
+  height: 26px;
+  line-height: 20px;
+  padding: 3px 7px;
+  overflow: visible;
+  position: relative;
+  border: 0;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.tb-embedded-auth-open-popup:active {
+  color: #dedede;
+  text-decoration: none;
+}
+
+.tb-embedded-auth-advisory {
+  text-align: left;
+  margin: 20px auto;
+  width: 720px;
+  padding: 6px 18px;
+  border: 1px solid #C0C0C0;
+}
+
+  .tb-embedded-auth-advisory p {
+    color: #909090;
+    margin: 12px 0;
+  }
+
+    .tb-embedded-auth-advisory p .tb-highlight {
+      font-weight: bold;
+    }
+</style><script id="oauth-select-credentials" type="text/ejs"><div class="tb-oauth-select-credentials"><span class="tb-oauth-select-credentials-prompt">Conectarse siempre con</span><select><option value="">Elija…</option><% _.forEach(oauthCredentials, function(credential) { %><option value="<%- credential.id %>"><%- credential.username %></option>
+<% }); %><option value="new">Crear una credencial nueva</option></select><div class="tb-error"></div></div></script><script id="auth-button-tmpl" type="text/ejs"><a class="tb-embedded-auth-open-popup"><%- buttonText %></a><div class="tb-embedded-auth-advisory"><p><%= advisoryMessageHtml %></p></div></script></head><body><div class="tb-embedded-auth"></div></body></html>

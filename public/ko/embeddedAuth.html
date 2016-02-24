@@ -1,0 +1,471 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Tableau Server 로그인</title><script src="/console-polyfill.js?6c9douvp67a7zaor"></script><script src="/jquery.js?6c9douvp67a7zaor"></script><script src="/underscore.js?6c9douvp67a7zaor"></script><script>// This is needed to hide any spinners the parent frame might be using
+try {
+  window.parent.postMessage('tableau.loadIndicatorsLoaded', '*');
+} catch (e) {
+}
+// See return value for documentation
+window.EmbeddedAuthHelper = (function(window, $, _) {
+
+  // This function corrects a bug caused by $.param, which replaces spaces with '+' characters
+  // TODO: Write a test that attempts to access the web authoring page of a view that has a space in its name
+  // (i.e. "Sheet 1") via a redirect after authentication
+  function param() {
+    return $.param.apply($, arguments).replace(/\+/g, '%20');
+  }
+
+  // Simple implementation for the inverse of $.param() for flat objects
+  var deparam = (function () { // Initialize the deparam() method
+    function toPrimitive(str) {
+      if (str === 'undefined') return undefined;
+      if (str === 'null') return null;
+      if (str === 'true') return true;
+      if (str === 'false') return false;
+      if (str === 'NaN') return NaN;
+      if (str === '') return '';
+      var num = Number(str);
+      if (!_.isNaN(num)) return num;
+      return str;
+    }
+
+    // Given a query fragment string, it returns an array of the key/value pair.
+    // Example: splitQueryFrag("key=value") => ["key","value"]
+    function splitQueryFrag(queryFrag) {
+      if (!queryFrag) return;
+      var fragMatch = queryFrag.match(/([^=]*)=?(.*)/);
+      if (!fragMatch) return;
+      return [decodeURIComponent(fragMatch[1]), toPrimitive(decodeURIComponent(fragMatch[2]))];
+    }
+
+    return function deparam(queryString) {
+      if (!queryString) return {};
+      return _.chain(queryString.split('&'))
+              .map(splitQueryFrag)
+              .compact()
+              .object()
+              .value();
+    }
+  })();
+
+  // NOTE: Keep these in sync with the code in AddOAuthCredentialAction.ts.
+  var attemptAuth = (function() {
+    var deferred = $.Deferred();
+    var openWindow;
+
+    function removeOpenWindow() {
+      try {
+        openWindow.close();
+      } catch (e) {
+      } // Closing the window is best effort so nothing else to do instead
+
+      openWindow = null;
+    }
+
+    // success callback
+    var notifySuccess = function(credentialId) {
+      deferred.resolve(credentialId);
+      removeOpenWindow();
+    };
+
+      // error callback
+    var notifyError = function(errorCode) {
+      deferred.reject(errorCode);
+      removeOpenWindow();
+    };
+
+    function handleResponse(response) {
+      if(!response) response = '';
+
+      var errorCodeMatch = response.match(/errorCode=([^&]*)/);
+      if(errorCodeMatch) {
+        var errorCode = parseInt(errorCodeMatch[1], 10) || 0;
+        notifyError(errorCode);
+        return;
+      }
+
+      var newCredentialIdMatch = response.match(/id=([^&]*)/);
+      if(newCredentialIdMatch) {
+        notifySuccess(newCredentialIdMatch[1]);
+        return;
+      }
+
+      notifySuccess();
+    }
+
+    window.tableauPopupComplete = handleResponse;
+
+    $(window).on('message', function(jqEvent) {
+      var data = jqEvent.originalEvent.data;
+
+      // Ignore messages that don't come from the open window
+      if(jqEvent.originalEvent.source != openWindow || !_.isString(jqEvent.originalEvent.data)) return;
+
+      handleResponse(jqEvent.originalEvent.data);
+    });
+
+    // The user is navigating away from this page so the popup is no longer needed, let's try to remove it for them.
+    $(window).on('unload', removeOpenWindow);
+
+    // Open the popup
+    function openPopup(uri) {
+      var popupOptions = {
+        width: 800,
+        height: 600,
+        toolbar: 1,
+        resizable: 1
+      };
+
+      // IE8 polyfills. Note that outer* ones are not quite right for IE8, but good enough. B147312
+      var screenLeft = window.screenLeft || window.screenX;
+      var outerWidth = window.outerWidth || window.innerWidth;
+      var screenTop = window.screenTop || window.screenY;
+      var outerHeight = window.outerHeight || window.innerHeight;
+
+      // Open horizontally centered on current window
+      popupOptions.left = screenLeft + (outerWidth - popupOptions.width) / 2;
+
+      // Open a small amount from the top
+      popupOptions.top = screenTop + (outerHeight - popupOptions.height) / 8;
+
+      var popupOptionsString = _.map(popupOptions, function(val, key) { return key + "=" + val }).join(',');
+      openWindow = window.open(uri, 'TableauAuth', popupOptionsString);
+    }
+
+    return function attemptAuth(uri) {
+      // reject the previous request because a new request will be made in the same window
+      notifyError();
+
+      deferred = new $.Deferred();
+      openPopup(uri);
+
+      try {
+        // This will move the new open window on top of the window that opened it.  This is needed because we may
+        // not be able to close the window if it's open to a third party for OAuth
+        openWindow.focus();
+      } catch (e) { }
+
+      return deferred.promise();
+    }
+
+  }());
+
+  // Taken from WindowLocationService.setPathQueryFragment
+  var setPathQueryFragment = function(pathQueryFragment) {
+    var origin = window.location.protocol + '//' + window.location.host;
+    // add leading slash if it's missing
+    if(/^[^\/]/.test(pathQueryFragment)) {
+      pathQueryFragment = '/' + pathQueryFragment;
+    }
+    window.location.href = origin + pathQueryFragment;
+  }
+
+  function formatText(str, params) {
+    return str.replace(/\{([^}]*)}/g, function(frag, key) {
+      var val = params && params[key];
+      if(!val) console.error('Missing key: ' + key);
+      return val || frag;
+    });
+  }
+
+  return {
+    // arguments: uri to open
+    // returns: a promise that is fulfilled if window reports success or rejected with an error code
+    //          if the window reports an error
+    attemptAuth: attemptAuth,
+
+    // arguments: query string
+    // returns: query parameters as a Dict
+    deparam: deparam,
+
+    // arguments: same as the JQuery param method, http://api.jquery.com/jquery.param/
+    // This method differs from the JQuery one in that it replaces '+' with '%20'
+    param: param,
+
+    // arguments: path + query + fragment. Leading '/' optional.
+    // returns: void. Navigates away from page.
+    setPathQueryFragment: setPathQueryFragment,
+
+    // arguments: none
+    // returns: window.location's query parameters as a Dict
+    getQueryParams: function() {
+      return deparam(window.location.search.slice(1));
+    },
+
+    // arguments:
+    //   text[string]: text string with variables in the messageformat syntax
+    //   params[object]: the params object used for variable replacement in the string in the messageformat syntax.
+    // returns: text with defined variables
+    // NOTE: this method only does simple variable replacement from the messageformat syntax.
+    // If more complex translations are needed then this needs to include messageformat.js
+    formatText: formatText
+  };
+
+}(window, jQuery, _));
+
+window.VizPortalRequest = (function(window, $, _) {
+
+  var XSRF_TOKEN_COOKIE_KEY = 'XSRF-TOKEN';
+  var XSRF_TOKEN_HEADER_KEY = 'X-XSRF-TOKEN';
+
+  var VIZPORTAL_PATH_PREFIX = '/vizportal';
+
+  var ErrorTextStatus = 'Response has errors';
+
+  function rejectPromise() {
+    var deferred = new $.Deferred();
+    return deferred.reject.apply(deferred, _.toArray(arguments)).promise();
+  }
+
+  function getXsrfToken() {
+    // Adapted from http://stackoverflow.com/a/18652401
+    var keyValueMatch = window.document.cookie.match(new RegExp('(^|;) ?' + XSRF_TOKEN_COOKIE_KEY + '=([^;]*)(;|$)'));
+    return keyValueMatch && keyValueMatch[2];
+  }
+
+  function getResultError(result) {
+    return result.errors && result.errors[0];
+  }
+
+  function send(method, params) {
+    var headers = {};
+    headers[XSRF_TOKEN_HEADER_KEY] = getXsrfToken();
+
+    var vizportalRequestOptions = {
+      type: 'POST',
+      contentType: 'application/json;charset=UTF-8',
+      dataType: 'json',
+      headers: headers,
+      url: VIZPORTAL_PATH_PREFIX + '/api/web/v1/' + method,
+      data: JSON.stringify({
+        method: method,
+        params: params
+      })
+    };
+
+    // success( Anything data, String textStatus, jqXHR jqXHR )
+    // error(jqXHR jqXHR, String textStatus, String errorThrown)
+    return $.ajax(vizportalRequestOptions)
+            .then(function (data, textStatus, jqXHR) {
+              var result = data && data.result;
+
+              if (getResultError(result)) {
+                return rejectPromise(jqXHR, ErrorTextStatus);
+              }
+
+              return data.result;
+            });
+    }
+
+    return {
+      // arguments:
+      //   method[string]: the method string passed to the VizPortal API method
+      //   params[object]: the params object passed to the VizPortal API method
+      // returns JQuery promise, success contains the result and rejected returns a normal JQuery ajax failure
+      send: send,
+      getResultError: getResultError,
+      ErrorTextStatus: ErrorTextStatus
+    }
+  })(window, jQuery, _);</script><style>.tb-large-button {
+   line-height: 34px;
+   padding: 12px 23px;
+   font-size: 16px;
+   margin-left: auto;
+   margin-right: auto;
+}
+
+.tb-orange-button {
+   display: inline-block;
+   background-color: rgb(235,143,80);
+   text-align: center;
+   color: rgb(255,255,255);
+   outline: 0;
+   border-radius: 2px;
+   -o-border-radius: 2px;
+   -moz-border-radius: 2px;
+   -webkit-border-radius: 2px;
+   -khtml-border-radius: 2px;
+}
+
+.tb-orange-button:hover {
+   cursor: pointer;
+   text-decoration: none;
+   background-color: rgb(209,107,54);
+}
+
+.tb-container {
+   text-align: center;
+   border: 1px solid rgb(230,230,230);
+   position: absolute;
+   top: 0;
+   left: 0;
+   right: 0;
+   bottom: 0;
+   font-family: Verdana, Geneva, sans-serif;
+   border-radius: 2px;
+   -o-border-radius: 2px;
+   -moz-border-radius: 2px;
+   -webkit-border-radius: 2px;
+   -khtml-border-radius: 2px;
+
+  /* Start off with display none. Change it when we know we won't redirect */
+  display: none;
+}
+
+.tb-container-inner {
+  position: absolute;
+  top: 15%;
+  right: 0;
+  left: 0;
+  bottom: 0;
+}
+
+.tb-logo,
+.tb-logo-container {
+  margin: 0 auto;
+}
+
+.tb-button-container {
+  margin: 48px auto 0px auto;
+}</style></head><script src="/js.cookie.js?6c9douvp67a7zaor"></script><script>var AuthHelper = (function(window, $, _, Cookies) {
+
+  var BuildId = '6c9douvp67a7zaor';
+
+  // These maximums are known by tabadmin.
+  var CustomLogoMaxSize = {
+    height: 160,
+    width: 160
+  };
+
+  function getDefaultLogoAttributes() {
+    return {
+      src: '/img/tableau_sign_in_logo.png?' + BuildId,
+      width: 277,
+      height: 58
+    };
+  }
+
+  function getCustomLogoAttributes(serverSettings) {
+    var customization = (serverSettings && serverSettings.customization) || {};
+    if(customization.useCustomLogo) {
+      return {
+        src: customization.customLogoPath,
+        width: Math.min(CustomLogoMaxSize.width, customization.customLogoWidth),
+        height: Math.min(CustomLogoMaxSize.height, customization.customLogoHeight),
+        title: customization.serverName
+      };
+    } else {
+      var defaultAttributes = getDefaultLogoAttributes();
+      defaultAttributes.title = customization.serverName;
+      return defaultAttributes;
+    }
+  }
+
+  function createLogoWithAttributes(logoAttributes) {
+    return $('<div class="tb-logo">')
+            .attr({
+              title: logoAttributes.title
+            })
+            .css({
+              height: logoAttributes.height + 'px',
+              width: logoAttributes.width + 'px',
+              backgroundImage: 'url(' + logoAttributes.src + ')'
+            });
+  }
+
+  function getPopupButtonText(serverSettings) {
+    var serverName = serverSettings && serverSettings.customization && serverSettings.customization.serverName;
+    return serverName
+         ? EmbeddedAuthHelper.formatText("{SERVER_NAME} 로그인", { SERVER_NAME: serverName })
+         : "로그인";
+  }
+
+  // Trigger a callback function as soon as a cookie appears
+  function waitForCookie(cookieName, callback) {
+    var timerId = window.setInterval(function() {
+      var cookie = Cookies.get(cookieName);
+      if (cookie) {
+        callback(cookie);
+        window.clearInterval(timerId);
+      }
+    }, 100);
+  };
+
+  return {
+    getDefaultLogoAttributes: getDefaultLogoAttributes,
+    getCustomLogoAttributes: getCustomLogoAttributes,
+    createLogoWithAttributes: createLogoWithAttributes,
+    getPopupButtonText: getPopupButtonText,
+    waitForCookie: waitForCookie
+  }
+
+})(window, jQuery, _, Cookies);
+
+$(function() {
+  var params = EmbeddedAuthHelper.getQueryParams();
+
+  // Redirect to signin if we're the top window
+  if (window == window.top) {
+    var redirectQueryParams = {
+      externalRedirect: params.path
+    };
+    if (_.isString(params.siteUrlName)) {
+      redirectQueryParams.site = params.siteUrlName;
+    }
+    window.location.href = '/#/signin?' + EmbeddedAuthHelper.param(redirectQueryParams);
+    return;
+  }
+
+  var popupButton = $('#popup-button');
+  var logoContainer = $('.tb-logo-container');
+
+  VizPortalRequest.send('getServerSettingsUnauthenticated')
+    .then(function(serverSettings) {
+      logoContainer.html(AuthHelper.createLogoWithAttributes(AuthHelper.getCustomLogoAttributes(serverSettings)));
+      popupButton.text(AuthHelper.getPopupButtonText(serverSettings));
+    })
+    .fail(function() {
+      logoContainer.html(AuthHelper.createLogoWithAttributes(AuthHelper.getDefaultLogoAttributes()));
+      popupButton.text(AuthHelper.getPopupButtonText());
+    })
+    .always(function() {
+      $('.tb-container').show();
+    });
+
+  popupButton.click(function() {
+    var queryParams = '';
+    if (_.isString(params.siteUrlName)) {
+      queryParams = '?' + $.param({
+        closePopupWhenDone: true,
+        site: params.siteUrlName
+      });
+    }
+    EmbeddedAuthHelper.attemptAuth('/#/signin' + queryParams)
+      .then(
+        function() {
+          // Success! Redirect to viz
+          EmbeddedAuthHelper.setPathQueryFragment(params['path']);
+        },
+        function(reason) {
+          // Failure. Currently the popup stays open on failure, so nothing to do here
+        });
+  });
+
+  // Tableau Online sites may be hosted on different domains (known as Multi-Instance pods).
+  // When the authentication process completes in the popup window, the embedded viz
+  // must be reloaded. To ensure that the embedded viz is being loaded from the right domain,
+  // the popup window must comminicate its own domain to the embedded viz.
+  //
+  // The technique of using cookies to pass information between browser windows is used here
+  // since IE doesn't fully support cross-domain postMessage(), contrary to documentation.
+  // It also multi-casts to several embedded vizes.
+  //
+  // The cookie name is site-specific since Multi-Instance pods are partitioned by sites.
+  //
+  var siteUrlName = params.siteUrlName || '';
+  var newPath = params.path || '';
+
+  AuthHelper.waitForCookie('redirectToPod' + siteUrlName, function(newHost) {
+    // We need to concat the new host with our existing path to create the right destination URL
+    var newUrl = newHost + newPath;
+    window.location.replace(newUrl);
+  });
+});</script><body><div class="tb-container"><div class="tb-container-inner"><div class="tb-logo-container"></div><div class="tb-button-container"><a id="popup-button" class="tb-large-button tb-orange-button"></a></div></div></div></body></html>

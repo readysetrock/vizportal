@@ -1,0 +1,31 @@
+URI: de/pageNotFound.html
+Content-type: text\html
+Content-language: de
+
+URI: en/pageNotFound.html
+Content-type: text\html
+Content-language: en
+
+URI: es/pageNotFound.html
+Content-type: text\html
+Content-language: es
+
+URI: fr/pageNotFound.html
+Content-type: text\html
+Content-language: fr
+
+URI: ja/pageNotFound.html
+Content-type: text\html
+Content-language: ja
+
+URI: ko/pageNotFound.html
+Content-type: text\html
+Content-language: ko
+
+URI: pt/pageNotFound.html
+Content-type: text\html
+Content-language: pt
+
+URI: zh/pageNotFound.html
+Content-type: text\html
+Content-language: zh
